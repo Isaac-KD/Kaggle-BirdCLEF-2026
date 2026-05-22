@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""BirdCLEF 2026 - Unlabeled Soundscapes Feature Extraction Pipeline (Parallèle)
-Découpe les fichiers audio du Pantanal en segments de 5s et extrait 158 features.
-Orchestré en parallèle sur tous vos cœurs CPU pour une vitesse maximale.
-Sauvegarde automatique et sécurisée en cas d'interruption (Ctrl+C).
-"""
-
-# IMPORTANT: Désactive Numba JIT par sécurité pour éviter tout bug JIT
 import os
 os.environ["NUMBA_DISABLE_JIT"] = "1"
 
