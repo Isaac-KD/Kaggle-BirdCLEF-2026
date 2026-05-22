@@ -153,8 +153,48 @@ def safe_stat(array, stat_func, default=0.0):
     return stat_func(array)
 
 # ==========================================
-# 2. L'EXTRACTEUR OPTIMISÉ (158 FEATURES)
+# 2. PITCH ESTIMATION ET L'EXTRACTEUR OPTIMISÉ (158 FEATURES)
 # ==========================================
+
+def estimate_pitch_autocorrelation(y, sr, fmin=200, fmax=10000, frame_length=2048, hop_length=512):
+    """
+    Alternative robuste et 100% pure NumPy/SciPy à librosa.yin pour estimer le pitch.
+    Évite les segfaults de numba/gufunc sur Apple Silicon.
+    """
+    n_frames = 1 + (len(y) - frame_length) // hop_length
+    if n_frames <= 0:
+        return np.array([np.nan])
+        
+    f0 = []
+    lag_min = int(sr / fmax)
+    lag_max = int(sr / fmin)
+    
+    for i in range(n_frames):
+        start = i * hop_length
+        frame = y[start : start + frame_length]
+        frame = frame - np.mean(frame)
+        
+        if np.std(frame) < 1e-4:
+            f0.append(np.nan)
+            continue
+            
+        corr = np.correlate(frame, frame, mode='full')
+        corr = corr[len(corr)//2:]
+        
+        if lag_max >= len(corr):
+            f0.append(np.nan)
+            continue
+            
+        search_area = corr[lag_min:lag_max]
+        if len(search_area) == 0:
+            f0.append(np.nan)
+            continue
+            
+        peak_idx = np.argmax(search_area) + lag_min
+        pitch = sr / peak_idx if peak_idx > 0 else np.nan
+        f0.append(pitch)
+        
+    return np.array(f0)
 
 def extract_optimized_features(y, sr=32000):
     """
@@ -196,8 +236,8 @@ def extract_optimized_features(y, sr=32000):
     features.extend([safe_stat(zcr, np.mean), safe_stat(zcr, np.std)]) # 2
     
     # --- 3. Pitch F0 (4) & Modulation FM (3) ---
-    # YIN est le meilleur algo de pitch. On le limite[200Hz - 10000Hz] (zone oiseaux) pour aller plus vite
-    f0 = librosa.yin(y, fmin=200, fmax=10000, sr=sr)
+    # Utilise notre estimateur d'autocorrélation pure NumPy 100% stable
+    f0 = estimate_pitch_autocorrelation(y, sr, fmin=200, fmax=10000)
     f0_clean = f0[~np.isnan(f0)]
     
     if len(f0_clean) > 0:
@@ -289,3 +329,84 @@ def load_data(audio_path="features_birdclef_158.parquet",
     print(f"Matrice y (Labels) prête   : {y.shape}")
     
     return X, y, df_train
+
+# ==========================================
+# 3. SOUNDSCAPES UTILITIES & PROCESSING
+# ==========================================
+
+import ast
+
+def time_str_to_sec(time_str):
+    """Convertit une chaîne temporelle ('HH:MM:SS' ou 'MM:SS') en secondes (float)"""
+    parts = time_str.split(':')
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    elif len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    return float(time_str)
+
+def parse_labels(label_data):
+    """Parse la colonne primary_label en une liste Python robuste"""
+    if isinstance(label_data, list) or isinstance(label_data, pl.Series):
+        return list(label_data)
+    elif isinstance(label_data, str):
+        if ';' in label_data:
+            return label_data.split(';')
+        try:
+            return ast.literal_eval(label_data)
+        except Exception:
+            return [label_data]
+    return []
+
+def process_soundscape_file(file_path, df_file, species_to_idx, all_species_len, sr=32000):
+    """
+    Charge l'audio d'un soundscape une seule fois et extrait les 158 features
+    pour chaque fenêtre temporelle annotée.
+    """
+    try:
+        y, _ = librosa.load(file_path, sr=sr)
+    except Exception as e:
+        print(f"Erreur de chargement de l'audio {file_path}: {e}")
+        return []
+        
+    pantanal_lat = -19.05
+    pantanal_lon = -56.75
+    rows = []
+    
+    for row in df_file.iter_rows(named=True):
+        start_sec = time_str_to_sec(row["start"])
+        end_sec = time_str_to_sec(row["end"])
+        
+        start_sample = int(start_sec * sr)
+        end_sample = int(end_sec * sr)
+        
+        segment = y[start_sample:end_sample]
+        
+        # On ignore les segments de moins de 1 seconde (ex: en fin de fichier)
+        if len(segment) < (sr * 1):
+            continue
+            
+        try:
+            features = extract_optimized_features(segment, sr=sr)
+        except Exception as e:
+            print(f"Erreur d'extraction sur segment {start_sec}-{end_sec}: {e}")
+            continue
+
+        labels_list = parse_labels(row["primary_label"])
+        label_vec = np.zeros(all_species_len, dtype=np.float32)
+        
+        for l in labels_list:
+            if l in species_to_idx:
+                label_vec[species_to_idx[l]] = 1.0
+        
+        rows.append({
+            "filename": file_path.split('/')[-1],
+            "start_sec": float(start_sec),
+            "end_sec": float(end_sec),
+            "latitude": pantanal_lat,
+            "longitude": pantanal_lon,
+            "features": features.tolist(),
+            "labels": label_vec.tolist()
+        })
+        
+    return rows
