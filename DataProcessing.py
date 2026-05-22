@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 from itertools import groupby
+import ast
 
 def load_and_clean_dataset(csv_path, audio_dir):
     """
@@ -134,9 +135,6 @@ def process_file(path, label, sr=32000, segment_dur=5):
         rows.append({"common_name": label, "features": features.tolist()})
     return rows
 
-# ==========================================
-# 1. FONCTIONS DE NETTOYAGE ET UTILITAIRES
-# ==========================================
 
 def clean_spectrogram(S_db):
     """ Filtre médian et seuillage pour débruiter le spectrogramme """
@@ -151,10 +149,6 @@ def safe_stat(array, stat_func, default=0.0):
     if len(array) == 0 or np.all(np.isnan(array)):
         return default
     return stat_func(array)
-
-# ==========================================
-# 2. PITCH ESTIMATION ET L'EXTRACTEUR OPTIMISÉ (158 FEATURES)
-# ==========================================
 
 def estimate_pitch_autocorrelation(y, sr, fmin=200, fmax=10000, frame_length=2048, hop_length=512):
     """
@@ -236,7 +230,6 @@ def extract_optimized_features(y, sr=32000):
     features.extend([safe_stat(zcr, np.mean), safe_stat(zcr, np.std)]) # 2
     
     # --- 3. Pitch F0 (4) & Modulation FM (3) ---
-    # Utilise notre estimateur d'autocorrélation pure NumPy 100% stable
     f0 = estimate_pitch_autocorrelation(y, sr, fmin=200, fmax=10000)
     f0_clean = f0[~np.isnan(f0)]
     
@@ -248,13 +241,10 @@ def extract_optimized_features(y, sr=32000):
         features.extend([0]*7) # Remplit de zéros si pas de pitch
         
     # --- 4. Stats Mel Spectrogramme (16) ---
-    # Diviser le mel en 8 sous-bandes fréquentielles
     mel_bands = np.array_split(clean_mel, 8, axis=0)
     for band in mel_bands:
         features.extend([np.mean(band), np.std(band)]) # 16 (8x2)
 
-    # --- 5. Rythme, Syllabes et Active Frames (1 + 5 = 6) ---
-    # Une frame est active si elle n'a pas été mise à 0 par clean_spectrogram
     active_frames = (clean_mel.sum(axis=0) > 0).astype(int)
     features.append(np.mean(active_frames)) # 1 (Proportion active)
     
@@ -280,7 +270,6 @@ def extract_optimized_features(y, sr=32000):
     else:
         features.extend([0, 0, 0])
         
-    # Flatten the result into a strict 1D numpy array of 158 elements
     final_vector = np.concatenate([np.array([f]).flatten() for f in features])
     return final_vector.astype(np.float32)
 
@@ -313,7 +302,7 @@ def load_data(audio_path="features_birdclef_158.parquet",
 
     # Concaténation verticale
     df_train = pl.concat([df_audio_clean, df_soundscapes_clean])
-    print(f"✅ Fusion réussie ! Shape final: {df_train.shape}")
+    print(f"Fusion réussie ! Shape final: {df_train.shape}")
 
     # 4. Préparation de X (Features) et y (Cibles)
     print("\n3. Création des matrices X et y pour l'entraînement...")
@@ -329,12 +318,6 @@ def load_data(audio_path="features_birdclef_158.parquet",
     print(f"Matrice y (Labels) prête   : {y.shape}")
     
     return X, y, df_train
-
-# ==========================================
-# 3. SOUNDSCAPES UTILITIES & PROCESSING
-# ==========================================
-
-import ast
 
 def time_str_to_sec(time_str):
     """Convertit une chaîne temporelle ('HH:MM:SS' ou 'MM:SS') en secondes (float)"""
